@@ -7,11 +7,14 @@
 #
 # y de ahí en adelante todo es guiado, de a un paso por vez:
 #
-#   1. Las herramientas: git, uv y GitHub CLI (`gh`). Instala lo que falte, de a una.
+#   1. Las herramientas: git, uv, GitHub CLI (`gh`) y Node. Instala lo que falte, de a una.
+#      Node no frena nada si no se puede: sólo hace falta para ver las apps NUEVAS que le arme
+#      su equipo (su pantalla se compila); MateOS abre igual con lo ya compilado.
 #   2. Tu cuenta de GitHub: `gh auth login` por el navegador, si no entraste todavía.
 #   3. El acceso a MateOS: chequea que ya aceptaste la invitación a la vidriera.
 #   4. Tu cerebro: crea TU repo privado desde la plantilla y lo baja a tu compu.
-#   5. Instala el comando `mateos` y activa el equipo de agentes (`mateos install`).
+#   5. Instala el comando `mateos`, prepara `frontend/` (`npm ci`, si hay Node) y activa el
+#      equipo de agentes (`mateos install`).
 #   6. El chat con IA: Claude Code o Codex (opcional; ofrece instalar Claude Code).
 #   y al final abre `mateos ui`.
 #
@@ -59,6 +62,11 @@ set -Eeuo pipefail
 
 VIDRIERA_DEFAULT="businessos-hq/mateos"
 TOTAL_PASOS=6
+# Node mínimo para compilar la pantalla de una app nueva: lo pide Tailwind v4
+# (`@tailwindcss/oxide`, engines >= 20). Es el mismo número que `NODE_MINIMO` en
+# `mateos_cli/web/build.py` (lo ata un test). NODE_LTS es la línea que se instala.
+NODE_MINIMO=20
+NODE_LTS=24
 
 principal() {
   VIDRIERA="${MATEOS_VIDRIERA:-$VIDRIERA_DEFAULT}"
@@ -88,6 +96,7 @@ principal() {
   asegurar_git
   asegurar_uv
   asegurar_gh
+  asegurar_node
 
   paso 2 "Tu cuenta de GitHub"
   asegurar_login
@@ -352,21 +361,33 @@ gestor_linux() {
   fi
 }
 
+# pedir_sudo <qué> <para qué>: avisa qué y por qué, pregunta, y recién ahí pide la contraseña.
+pedir_sudo() {
+  aviso "Para instalar $1 necesito permiso de administrador (sudo)."
+  info "Es para $2. Te va a pedir la contraseña con la que entrás a la"
+  info "compu (mientras la escribís no se ve nada: es normal)."
+  confirmar "¿Lo instalo?" || return 1
+  # Con --si puede no haber terminal (soporte, una máquina desatendida): ahí el `</dev/tty`
+  # falla antes de correr sudo, aunque tenga el permiso cacheado o NOPASSWD. sudo igual
+  # pide la contraseña por la terminal (nunca por stdin), así que sin redirección no se
+  # come el script de `curl … | bash`.
+  if [ "$SI" -eq 1 ]; then
+    sudo -v || return 1
+  else
+    sudo -v </dev/tty || return 1
+  fi
+}
+
 # instalar_con_sudo <paquete> <para qué>: avisa, pregunta, y recién ahí usa sudo.
 instalar_con_sudo() {
   local paquete="$1" para="$2" gestor
   gestor="$(gestor_linux)"
   [ -z "$gestor" ] && return 1
-  aviso "Para instalar $paquete necesito permiso de administrador (sudo)."
-  info "Es para $para. Te va a pedir la contraseña con la que entrás a la"
-  info "compu (mientras la escribís no se ve nada: es normal)."
-  confirmar "¿Lo instalo?" || return 1
+  pedir_sudo "$paquete" "$para" || return 1
   if [ "$gestor" = "apt" ]; then
-    sudo -v </dev/tty || return 1
     correr "Instalando $paquete" sudo apt-get update -qq || return 1
     correr "Instalando $paquete (sigue)" sudo apt-get install -y "$paquete" || return 1
   else
-    sudo -v </dev/tty || return 1
     correr "Instalando $paquete" sudo dnf install -y "$paquete" || return 1
   fi
 }
@@ -444,6 +465,146 @@ asegurar_gh() {
     sumar_al_path /opt/homebrew/bin /usr/local/bin
   done
   ok "GitHub CLI instalado."
+}
+
+# Node: para que las apps nuevas que le arme su equipo al cliente tengan pantalla (su UI se
+# compila adentro de la interfaz, y para compilar hace falta Node). NO frena la instalación:
+# sin Node, MateOS abre igual con lo ya compilado. Por eso acá nunca hay `fallar`.
+
+# El número mayor del Node instalado (vacío si no está o no contesta).
+mayor_node() {
+  local v
+  v="$(node --version 2>/dev/null || true)"
+  v="${v#v}"
+  v="${v%%.*}"
+  case "$v" in
+    ""|*[!0-9]*) printf '' ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+
+node_alcanza() {
+  local m
+  m="$(mayor_node)"
+  [ -n "$m" ] && [ "$m" -ge "$NODE_MINIMO" ]
+}
+
+# El mayor de la versión de `nodejs` que ofrece apt (0 si no ofrece ninguna). Es lo que
+# decide si alcanza con el paquete del sistema: Ubuntu 22.04 trae el 12, Ubuntu 24.04 y
+# Debian 12 el 18, viejos para compilar. Con NodeSource ya sumado, es el de NodeSource.
+mayor_node_apt() {
+  local v
+  v="$(apt-cache policy nodejs 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+  v="${v#*:}"
+  v="${v%%.*}"
+  case "$v" in
+    ""|*[!0-9]*) printf '0' ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+
+# Linux: el paquete del sistema si alcanza; si no (apt), el repositorio oficial de NodeSource.
+instalar_node_linux() {
+  local gestor para="que las apps nuevas que te arme tu equipo tengan pantalla"
+  gestor="$(gestor_linux)"
+  [ -z "$gestor" ] && return 1
+  if [ "$gestor" = "dnf" ]; then
+    pedir_sudo "Node" "$para" || return 1
+    correr "Instalando Node" sudo dnf install -y nodejs npm || return 1
+    return 0
+  fi
+  if [ "$(mayor_node_apt)" -lt "$NODE_MINIMO" ]; then
+    info "El Node que trae tu sistema es viejo para esto (hace falta el $NODE_MINIMO o más)."
+    info "Lo bajo del repositorio oficial de Node (NodeSource)."
+    pedir_sudo "Node" "$para" || return 1
+    correr "Sumando el repositorio oficial de Node (NodeSource)" \
+      bash -c 'set -o pipefail; curl -fsSL "https://deb.nodesource.com/setup_$1.x" | sudo -E bash -' _ "$NODE_LTS" \
+      || return 1
+    # El `nodejs` de NodeSource ya trae npm adentro (y choca con el paquete `npm` de apt).
+    correr "Instalando Node" sudo apt-get install -y nodejs || return 1
+    return 0
+  fi
+  pedir_sudo "Node" "$para" || return 1
+  correr "Instalando Node" sudo apt-get update -qq || return 1
+  correr "Instalando Node (sigue)" sudo apt-get install -y nodejs || return 1
+  # El `nodejs` de Debian/Ubuntu viene sin npm (va aparte).
+  if ! hay npm; then
+    correr "Instalando npm" sudo apt-get install -y npm || return 1
+  fi
+}
+
+# El .pkg oficial de nodejs.org, verificado contra su SHASUMS256 antes de instalarlo.
+bajar_pkg_node() {
+  local dir="$1" base linea suma nombre calculada
+  base="https://nodejs.org/dist/latest-v$NODE_LTS.x"
+  curl -fsSL "$base/SHASUMS256.txt" -o "$dir/SHASUMS256.txt" || return 1
+  linea="$(grep -E ' node-v[0-9.]+\.pkg$' "$dir/SHASUMS256.txt" | head -n 1)"
+  [ -n "$linea" ] || return 1
+  suma="${linea%% *}"
+  nombre="${linea##* }"
+  curl -fsSL "$base/$nombre" -o "$dir/node.pkg" || return 1
+  calculada="$(shasum -a 256 "$dir/node.pkg" | awk '{print $1}')"
+  [ "$calculada" = "$suma" ]
+}
+
+# Mac sin Homebrew: el instalador oficial de nodejs.org (pide la contraseña de la compu).
+instalar_node_pkg_mac() {
+  local dir
+  info "Voy a bajar el instalador oficial de Node desde nodejs.org."
+  pedir_sudo "Node" "que las apps nuevas que te arme tu equipo tengan pantalla" || return 1
+  dir="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/mateos-node")"
+  mkdir -p "$dir"
+  correr "Bajando Node de nodejs.org" bajar_pkg_node "$dir" || return 1
+  correr "Instalando Node" sudo installer -pkg "$dir/node.pkg" -target / || return 1
+}
+
+asegurar_node() {
+  sumar_al_path /opt/homebrew/bin /usr/local/bin
+  if node_alcanza; then
+    ok "Node ya está instalado (para que las apps nuevas que te arme tu equipo tengan pantalla)."
+    return 0
+  fi
+  local previo
+  previo="$(mayor_node)"
+  if [ -n "$previo" ]; then
+    info "Tenés Node $previo, pero las apps nuevas necesitan Node $NODE_MINIMO o más nuevo."
+  else
+    info "Falta Node: para que las apps nuevas que te arme tu equipo tengan pantalla."
+  fi
+  if [ "$SO" = "mac" ]; then
+    if hay brew; then
+      if [ -n "$previo" ]; then
+        correr "Actualizando Node con Homebrew" brew upgrade node \
+          || correr "Instalando Node con Homebrew" brew install node || true
+      else
+        correr "Instalando Node con Homebrew" brew install node || true
+      fi
+    else
+      instalar_node_pkg_mac || true
+    fi
+  else
+    instalar_node_linux || true
+  fi
+  sumar_al_path /opt/homebrew/bin /usr/local/bin
+  hash -r 2>/dev/null || true
+  if node_alcanza; then
+    ok "Node instalado."
+    return 0
+  fi
+  aviso "No pude instalar Node solo. MateOS anda igual: Node sólo hace falta"
+  info "para ver las apps nuevas que te arme tu equipo."
+  info "Bajalo de https://nodejs.org (el botón que dice LTS), instalalo como"
+  info "cualquier programa y volvé a esta ventana."
+  if [ "$SI" -eq 0 ]; then
+    esperar_enter "Cuando esté instalado apretá Enter (o Enter directo para seguir sin Node)."
+    sumar_al_path /opt/homebrew/bin /usr/local/bin
+    hash -r 2>/dev/null || true
+    if node_alcanza; then
+      ok "Node instalado."
+      return 0
+    fi
+  fi
+  suave "Sigo sin Node. Lo sumás cuando quieras volviendo a correr este instalador."
 }
 
 # ─── Paso 2: login ────────────────────────────────────────────────────────────
@@ -662,6 +823,8 @@ instalar_mateos() {
   hay mateos || fallar "MateOS se instaló, pero esta ventana todavía no lo ve." \
     "Cerrá la Terminal, abrí una nueva y volvé a pegar el comando."
 
+  preparar_apps
+
   if (cd "$CARPETA" && mateos verificar --sin-ping) </dev/null >>"$LOG" 2>&1; then
     ok "Revisé tu compu: está todo en orden."
   else
@@ -674,6 +837,29 @@ instalar_mateos() {
   correr "Activando tu equipo de agentes" \
     bash -c 'cd "$1" && shift && mateos install "$@"' _ "$CARPETA" $args \
     || fallar "No pude activar el equipo de agentes." "Volvé a pegar el comando."
+}
+
+# Baja las piezas para compilar la pantalla de las apps nuevas (`frontend/node_modules`).
+# No es bloqueante: sin esto MateOS anda igual con el `static/` versionado, y `mateos ui` lo
+# reintenta solo la próxima vez que haga falta. Idempotente: si ya están, no se rehace
+# (`npm ci` borra y vuelve a bajar todo; repetirlo en cada corrida serían minutos de nada).
+preparar_apps() {
+  local frontend="$CARPETA/frontend" sub="install"
+  [ -f "$frontend/package.json" ] || return 0
+  if ! node_alcanza || ! hay npm; then
+    suave "Sin Node, salteo lo de las apps nuevas (MateOS anda igual)."
+    return 0
+  fi
+  if [ -e "$frontend/node_modules/.bin/vite" ] && [ -e "$frontend/node_modules/.bin/tsc" ]; then
+    ok "Lo necesario para tus apps nuevas ya está preparado."
+    return 0
+  fi
+  [ -f "$frontend/package-lock.json" ] && sub="ci"
+  if ! correr "Preparando lo necesario para tus apps nuevas (tarda un poco la primera vez)" \
+      bash -c 'cd "$1" && npm "$2" --no-audit --no-fund' _ "$frontend" "$sub"; then
+    aviso "No pude prepararlo ahora (suele ser la conexión). No frena nada: MateOS"
+    info "lo vuelve a intentar solo la primera vez que tu equipo te arme una app nueva."
+  fi
 }
 
 # ─── Paso 6: IA ───────────────────────────────────────────────────────────────
