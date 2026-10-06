@@ -34,12 +34,15 @@ irm https://raw.githubusercontent.com/businessos-hq/instalar/main/instalar.ps1 |
 El instalador te guía de a un paso por vez y te pregunta antes de hacer cualquier cosa
 importante:
 
-1. Instala lo que tu compu necesite (git, uv y GitHub CLI), si falta.
+1. Instala lo que tu compu necesite (git, uv, GitHub CLI y Node), si falta. Node es para
+   que las apps nuevas que te arme tu equipo tengan pantalla: si no lo puede instalar solo,
+   te deja el link y sigue igual.
 2. Te hace entrar a tu cuenta de GitHub: se abre el navegador y aceptás.
 3. Revisa que ya tengas acceso a MateOS.
 4. Crea **tu cerebro**: una copia de MateOS privada, sólo tuya, en tu cuenta de GitHub y en
    una carpeta de tu compu (por default `MateOS/mi-cerebro`, adentro de tu carpeta personal).
-5. Instala MateOS y su equipo de agentes.
+5. Instala MateOS y su equipo de agentes, y prepara lo necesario para tus apps nuevas (la
+   primera vez tarda un poco).
 6. Te ofrece instalar Claude Code, para el chat con IA (es opcional).
 
 Al final abre MateOS en tu navegador. Para abrirlo otro día, en la Terminal (o PowerShell):

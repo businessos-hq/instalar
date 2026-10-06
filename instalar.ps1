@@ -7,11 +7,14 @@
 #
 # y de ahí en adelante todo es guiado, de a un paso por vez:
 #
-#   1. Las herramientas: git, uv y GitHub CLI (gh). Instala lo que falte con winget.
+#   1. Las herramientas: git, uv, GitHub CLI (gh) y Node. Instala lo que falte con winget.
+#      Node no frena nada si no se puede: sólo hace falta para ver las apps NUEVAS que le arme
+#      su equipo (su pantalla se compila); MateOS abre igual con lo ya compilado.
 #   2. Tu cuenta de GitHub: `gh auth login` por el navegador, si no entraste todavía.
 #   3. El acceso a MateOS: chequea que ya aceptaste la invitación a la vidriera.
 #   4. Tu cerebro: crea TU repo privado desde la plantilla y lo baja a tu compu.
-#   5. Instala el comando `mateos` y activa el equipo de agentes (`mateos install`).
+#   5. Instala el comando `mateos`, prepara `frontend\` (`npm ci`, si hay Node) y activa el
+#      equipo de agentes (`mateos install`).
 #   6. El chat con IA: Claude Code o Codex (opcional; ofrece instalar Claude Code).
 #   y al final abre `mateos ui`.
 #
@@ -55,6 +58,10 @@ param(
 )
 
 $script:TotalPasos = 6
+# Node mínimo para compilar la pantalla de una app nueva: lo pide Tailwind v4
+# (@tailwindcss/oxide, engines >= 20). Mismo número que NODE_MINIMO en
+# mateos_cli/web/build.py (lo ata un test).
+$script:NodeMinimo = 20
 $script:PasoActual = 0
 $script:PasoTitulo = "la preparación"
 $script:SinIa = [bool]$SinIa -or ($env:MATEOS_SIN_IA -eq "1")
@@ -273,6 +280,55 @@ function AsegurarGh {
     [void](InstalarConWinget "GitHub.cli" "GitHub CLI")
     EsperarHerramienta "gh" "GitHub CLI" "https://cli.github.com"
     Ok "GitHub CLI instalado."
+}
+
+# Node: para que las apps nuevas que le arme su equipo al cliente tengan pantalla (su UI se
+# compila adentro de la interfaz). NO frena la instalación: sin Node, MateOS abre igual con
+# lo ya compilado. Por eso acá nunca hay Fallar.
+
+# El número mayor del Node instalado (0 si no está o no contesta).
+function MayorNode {
+    if (-not (Hay "node")) { return 0 }
+    $previo = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { $v = (node --version 2>$null | Out-String).Trim() } catch { $v = "" }
+    finally { $ErrorActionPreference = $previo }
+    if ($v -match '^v(\d+)\.') { return [int]$Matches[1] }
+    return 0
+}
+
+function NodeAlcanza { return ((MayorNode) -ge $script:NodeMinimo) }
+
+# npm.cmd y no npm: con la política de ejecución por default de Windows, `npm` resuelve a
+# npm.ps1 y PowerShell se niega a correrlo ("la ejecución de scripts está deshabilitada").
+function ComandoNpm {
+    if (Get-Command "npm.cmd" -ErrorAction SilentlyContinue) { return "npm.cmd" }
+    if (Hay "npm") { return "npm" }
+    return ""
+}
+
+function AsegurarNode {
+    RefrescarPath
+    if (NodeAlcanza) { Ok "Node ya está instalado (para que las apps nuevas que te arme tu equipo tengan pantalla)."; return }
+    $previo = MayorNode
+    if ($previo -gt 0) {
+        Info "Tenés Node $previo, pero las apps nuevas necesitan Node $($script:NodeMinimo) o más nuevo."
+    }
+    else {
+        Info "Falta Node: para que las apps nuevas que te arme tu equipo tengan pantalla."
+    }
+    [void](InstalarConWinget "OpenJS.NodeJS.LTS" "Node")
+    if (NodeAlcanza) { Ok "Node instalado."; return }
+    Aviso "No pude instalar Node solo. MateOS anda igual: Node sólo hace falta"
+    Info "para ver las apps nuevas que te arme tu equipo."
+    Info "Bajalo de https://nodejs.org (el botón que dice LTS), instalalo como"
+    Info "cualquier programa y volvé a esta ventana."
+    if (-not $script:Si) {
+        EsperarEnter "Cuando esté instalado apretá Enter (o Enter directo para seguir sin Node)."
+        RefrescarPath
+        if (NodeAlcanza) { Ok "Node instalado."; return }
+    }
+    Suave "Sigo sin Node. Lo sumás cuando quieras volviendo a correr este instalador."
 }
 
 # --- Paso 2: login --------------------------------------------------------------------
@@ -496,6 +552,7 @@ function InstalarMateos {
         if (-not (Hay "mateos")) {
             Fallar "MateOS se instaló, pero esta ventana todavía no lo ve." "Cerrá PowerShell, abrí uno nuevo y volvé a pegar el comando."
         }
+        PrepararApps
         if (Silencioso { mateos verificar --sin-ping }) {
             Ok "Revisé tu compu: está todo en orden."
         }
@@ -509,6 +566,33 @@ function InstalarMateos {
     }
     finally {
         Pop-Location
+    }
+}
+
+# Baja las piezas para compilar la pantalla de las apps nuevas (frontend\node_modules). No es
+# bloqueante: sin esto MateOS anda igual con el static/ versionado, y `mateos ui` lo reintenta
+# solo cuando haga falta. Idempotente: si ya están, no se rehace (npm ci borra y re-baja todo).
+function PrepararApps {
+    $frontend = Join-Path $script:Carpeta "frontend"
+    if (-not (Test-Path (Join-Path $frontend "package.json"))) { return }
+    $npm = ComandoNpm
+    if (-not (NodeAlcanza) -or -not $npm) {
+        Suave "Sin Node, salteo lo de las apps nuevas (MateOS anda igual)."
+        return
+    }
+    $bin = Join-Path (Join-Path $frontend "node_modules") ".bin"
+    $hayVite = (Test-Path (Join-Path $bin "vite")) -or (Test-Path (Join-Path $bin "vite.cmd"))
+    $hayTsc = (Test-Path (Join-Path $bin "tsc")) -or (Test-Path (Join-Path $bin "tsc.cmd"))
+    if ($hayVite -and $hayTsc) { Ok "Lo necesario para tus apps nuevas ya está preparado."; return }
+    $sub = if (Test-Path (Join-Path $frontend "package-lock.json")) { "ci" } else { "install" }
+    Push-Location $frontend
+    try {
+        $ok = Correr "Preparando lo necesario para tus apps nuevas (tarda un poco la primera vez)" { & $npm $sub --no-audit --no-fund }
+    }
+    finally { Pop-Location }
+    if (-not $ok) {
+        Aviso "No pude prepararlo ahora (suele ser la conexión). No frena nada: MateOS"
+        Info "lo vuelve a intentar solo la primera vez que tu equipo te arme una app nueva."
     }
 }
 
@@ -591,6 +675,7 @@ function Principal {
     AsegurarGit
     AsegurarUv
     AsegurarGh
+    AsegurarNode
 
     Paso 2 "Tu cuenta de GitHub"
     AsegurarLogin
